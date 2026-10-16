@@ -24,25 +24,35 @@ const otpExpiry = () =>
 const sendOtpEmail = async (email, otp, purpose) => {
   const isSignup = purpose === "signup";
 
-  return transporter.sendMail({
-    from: process.env.SENDER_EMAIL,
-    to: email,
-    subject: isSignup
-      ? "Verify your NITRA account"
-      : "NITRA password reset OTP",
-    text: `Your NITRA ${isSignup ? "verification" : "password reset"
-      } OTP is ${otp}. It expires in 10 minutes. Do not share this code.`,
-    html: `
-      <div style="font-family:Arial,sans-serif;max-width:500px;margin:auto;padding:24px">
-        <h2>NITRA</h2>
-        <h3>${isSignup ? "Verify your email" : "Reset your password"}</h3>
-        <p>Your one-time password is:</p>
-        <h1 style="letter-spacing:8px">${otp}</h1>
-        <p>This code expires in 10 minutes.</p>
-        <p>If you did not request this, you can ignore this email.</p>
-      </div>
-    `,
-  });
+  try {
+    const info = await transporter.sendMail({
+      from: process.env.SENDER_EMAIL,
+      to: email,
+      subject: isSignup
+        ? "Verify your NITRA account"
+        : "NITRA password reset OTP",
+
+      text: `Your NITRA ${
+        isSignup ? "verification" : "password reset"
+      } OTP is ${otp}. It expires in 10 minutes.`,
+
+      html: `
+        <div style="font-family: Arial, sans-serif;">
+          <h2>NITRA</h2>
+          <h3>${isSignup ? "Verify your email" : "Reset your password"}</h3>
+          <p>Your one-time password is:</p>
+          <h1>${otp}</h1>
+          <p>This code expires in 10 minutes.</p>
+        </div>
+      `,
+    });
+
+    console.log("OTP email accepted:", info.messageId);
+    return info;
+  } catch (error) {
+    console.error("OTP email failed:", error.message);
+    throw error;
+  }
 };
 
 // REGISTER — create an unverified account and email OTP
