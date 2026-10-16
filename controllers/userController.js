@@ -206,6 +206,7 @@ const verifySignupOtp = async (req, res) => {
 };
 
 // RESEND SIGNUP OTP
+
 const resendSignupOtp = async (req, res) => {
   try {
     const email = req.body.email?.trim().toLowerCase();
@@ -219,6 +220,7 @@ const resendSignupOtp = async (req, res) => {
 
     const user = await userModel.findOne({ email });
 
+    // Do not reveal whether an account exists or is verified
     if (!user || user.isAccountVerified !== false) {
       return res.json({
         success: true,
@@ -228,21 +230,31 @@ const resendSignupOtp = async (req, res) => {
     }
 
     const otp = generateOtp();
-    user.verifyOtpHash = hashOtp(otp);
-    user.verifyOtpExpiresAt = otpExpiry();
-    await user.save();
+    const otpHash = hashOtp(otp);
+    const expiresAt = otpExpiry();
 
+    // Send email first
     await sendOtpEmail(email, otp, "signup");
+
+    // Save the new OTP only after email sending succeeds
+    user.verifyOtpHash = otpHash;
+    user.verifyOtpExpiresAt = expiresAt;
+    await user.save();
 
     return res.json({
       success: true,
       message: "A new OTP has been sent",
     });
   } catch (error) {
-    console.error("Resend signup OTP error:", error);
+    console.error("Resend signup OTP error:", {
+      message: error.message,
+      code: error.code,
+      command: error.command,
+    });
+
     return res.status(500).json({
       success: false,
-      message: "Unable to send OTP right now",
+      message: "Unable to send OTP right now. Please try again later.",
     });
   }
 };
