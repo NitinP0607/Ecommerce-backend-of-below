@@ -31,31 +31,40 @@ const sendOtpEmail = async (email, otp, purpose) => {
       subject: isSignup
         ? "Verify your NITRA account"
         : "NITRA password reset OTP",
-
       text: `Your NITRA ${
         isSignup ? "verification" : "password reset"
       } OTP is ${otp}. It expires in 10 minutes.`,
-
       html: `
-        <div style="font-family: Arial, sans-serif;">
+        <div style="font-family:Arial,sans-serif">
           <h2>NITRA</h2>
           <h3>${isSignup ? "Verify your email" : "Reset your password"}</h3>
           <p>Your one-time password is:</p>
           <h1>${otp}</h1>
           <p>This code expires in 10 minutes.</p>
+          <p>If you did not request this, you can ignore this email.</p>
         </div>
       `,
     });
 
     console.log("OTP email accepted:", info.messageId);
+
+    if (info.rejected?.includes(email)) {
+      throw new Error("Recipient rejected by email server");
+    }
+
     return info;
   } catch (error) {
-    console.error("OTP email failed:", error.message);
+    console.error("OTP email failed:", {
+      message: error.message,
+      code: error.code,
+      command: error.command,
+      responseCode: error.responseCode,
+    });
     throw error;
   }
 };
 
-// REGISTER — create an unverified account and email OTP
+// REGISTER
 const registerUser = async (req, res) => {
   try {
     const name = req.body.name?.trim();
@@ -76,7 +85,7 @@ const registerUser = async (req, res) => {
       });
     }
 
-    if (password.length < 8) {
+    if (typeof password !== "string" || password.length < 8) {
       return res.status(400).json({
         success: false,
         message: "Password must be at least 8 characters",
@@ -93,58 +102,49 @@ const registerUser = async (req, res) => {
     }
 
     const otp = generateOtp();
+    const otpHash = hashOtp(otp);
+    const expiresAt = otpExpiry();
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Send the email before replacing the stored OTP.
+    try {
+      await sendOtpEmail(email, otp, "signup");
+    } catch (mailError) {
+      return res.status(503).json({
+        success: false,
+        message:
+          "Unable to send OTP right now. Please try again later.",
+      });
+    }
 
     if (user) {
-      // Allow a pending, unverified account to request a fresh OTP.
       user.name = name;
-      user.password = await bcrypt.hash(password, 10);
-      user.verifyOtpHash = hashOtp(otp);
-      user.verifyOtpExpiresAt = otpExpiry();
+      user.password = hashedPassword;
+      user.verifyOtpHash = otpHash;
+      user.verifyOtpExpiresAt = expiresAt;
     } else {
       user = new userModel({
         name,
         email,
-        password: await bcrypt.hash(password, 10),
+        password: hashedPassword,
         isAccountVerified: false,
-        verifyOtpHash: hashOtp(otp),
-        verifyOtpExpiresAt: otpExpiry(),
+        verifyOtpHash: otpHash,
+        verifyOtpExpiresAt: expiresAt,
       });
     }
 
     await user.save();
-
-    try {
-      console.log("REGISTER: sending OTP email");
-
-      const info = await sendOtpEmail(email, otp, "signup");
-
-      console.log("REGISTER: email accepted by SMTP", {
-        messageId: info.messageId,
-        accepted: info.accepted,
-        rejected: info.rejected,
-      });
-    } catch (mailError) {
-      console.error("Signup email error:", {
-        message: mailError.message,
-        code: mailError.code,
-        command: mailError.command,
-        responseCode: mailError.responseCode,
-        response: mailError.response,
-      });
-
-      return res.status(503).json({
-        success: false,
-        message:
-          "Account is pending verification, but the email could not be sent. Please try resending the OTP.",
-      });
-    }
 
     return res.status(200).json({
       success: true,
       message: "OTP sent to your email. Verify to activate your account.",
     });
   } catch (error) {
-    console.error("Register error:", error);
+    console.error("Register error:", {
+      message: error.message,
+      code: error.code,
+    });
+
     return res.status(500).json({
       success: false,
       message: "Unable to register right now",
@@ -152,7 +152,7 @@ const registerUser = async (req, res) => {
   }
 };
 
-// VERIFY SIGNUP OTP — activate account and issue JWT
+// VERIFY SIGNUP OTP
 const verifySignupOtp = async (req, res) => {
   try {
     const email = req.body.email?.trim().toLowerCase();
@@ -189,6 +189,7 @@ const verifySignupOtp = async (req, res) => {
     user.isAccountVerified = true;
     user.verifyOtpHash = "";
     user.verifyOtpExpiresAt = null;
+
     await user.save();
 
     return res.json({
@@ -197,7 +198,8 @@ const verifySignupOtp = async (req, res) => {
       token: createToken(user._id),
     });
   } catch (error) {
-    console.error("Verify signup error:", error);
+    console.error("Verify signup error:", error.message);
+
     return res.status(500).json({
       success: false,
       message: "Unable to verify OTP",
@@ -206,21 +208,20 @@ const verifySignupOtp = async (req, res) => {
 };
 
 // RESEND SIGNUP OTP
-
 const resendSignupOtp = async (req, res) => {
   try {
     const email = req.body.email?.trim().toLowerCase();
 
-    if (!email) {
+    if (!email || !validator.isEmail(email)) {
       return res.status(400).json({
         success: false,
-        message: "Email is required",
+        message: "Please enter a valid email",
       });
     }
 
     const user = await userModel.findOne({ email });
 
-    // Do not reveal whether an account exists or is verified
+    // Use a generic response to avoid revealing account status.
     if (!user || user.isAccountVerified !== false) {
       return res.json({
         success: true,
@@ -230,15 +231,13 @@ const resendSignupOtp = async (req, res) => {
     }
 
     const otp = generateOtp();
-    const otpHash = hashOtp(otp);
-    const expiresAt = otpExpiry();
 
-    // Send email first
+    // Send first; preserve the previous stored OTP if sending fails.
     await sendOtpEmail(email, otp, "signup");
 
-    // Save the new OTP only after email sending succeeds
-    user.verifyOtpHash = otpHash;
-    user.verifyOtpExpiresAt = expiresAt;
+    user.verifyOtpHash = hashOtp(otp);
+    user.verifyOtpExpiresAt = otpExpiry();
+
     await user.save();
 
     return res.json({
@@ -252,7 +251,7 @@ const resendSignupOtp = async (req, res) => {
       command: error.command,
     });
 
-    return res.status(500).json({
+    return res.status(503).json({
       success: false,
       message: "Unable to send OTP right now. Please try again later.",
     });
@@ -281,7 +280,6 @@ const loginUser = async (req, res) => {
       });
     }
 
-    // Existing accounts without this field remain compatible.
     if (user.isAccountVerified === false) {
       return res.status(403).json({
         success: false,
@@ -295,7 +293,8 @@ const loginUser = async (req, res) => {
       token: createToken(user._id),
     });
   } catch (error) {
-    console.error("Login error:", error);
+    console.error("Login error:", error.message);
+
     return res.status(500).json({
       success: false,
       message: "Unable to log in right now",
@@ -303,7 +302,7 @@ const loginUser = async (req, res) => {
   }
 };
 
-// FORGOT PASSWORD — email a reset OTP
+// FORGOT PASSWORD
 const forgotPassword = async (req, res) => {
   try {
     const email = req.body.email?.trim().toLowerCase();
@@ -329,26 +328,33 @@ const forgotPassword = async (req, res) => {
 
     const otp = generateOtp();
 
+    // Preserve the existing reset OTP if email sending fails.
+    await sendOtpEmail(email, otp, "reset");
+
     user.resetOtpHash = hashOtp(otp);
     user.resetOtpExpiresAt = otpExpiry();
-    await user.save();
 
-    await sendOtpEmail(email, otp, "reset");
+    await user.save();
 
     return res.json({
       success: true,
       message: genericMessage,
     });
   } catch (error) {
-    console.error("Forgot password error:", error);
-    return res.status(500).json({
+    console.error("Forgot password error:", {
+      message: error.message,
+      code: error.code,
+      command: error.command,
+    });
+
+    return res.status(503).json({
       success: false,
       message: "Unable to process your request right now",
     });
   }
 };
 
-// RESET PASSWORD — validate OTP and save new password
+// RESET PASSWORD
 const resetPassword = async (req, res) => {
   try {
     const email = req.body.email?.trim().toLowerCase();
@@ -369,7 +375,10 @@ const resetPassword = async (req, res) => {
       });
     }
 
-    if (newPassword.length < 8) {
+    if (
+      typeof newPassword !== "string" ||
+      newPassword.length < 8
+    ) {
       return res.status(400).json({
         success: false,
         message: "Password must be at least 8 characters",
@@ -394,6 +403,7 @@ const resetPassword = async (req, res) => {
     user.password = await bcrypt.hash(newPassword, 10);
     user.resetOtpHash = "";
     user.resetOtpExpiresAt = null;
+
     await user.save();
 
     return res.json({
@@ -401,7 +411,8 @@ const resetPassword = async (req, res) => {
       message: "Password reset successfully. Please log in.",
     });
   } catch (error) {
-    console.error("Reset password error:", error);
+    console.error("Reset password error:", error.message);
+
     return res.status(500).json({
       success: false,
       message: "Unable to reset your password right now",
@@ -409,7 +420,7 @@ const resetPassword = async (req, res) => {
   }
 };
 
-
+// GET USER PROFILE
 const getUserProfile = async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -422,7 +433,6 @@ const getUserProfile = async (req, res) => {
     }
 
     const token = authHeader.split(" ")[1];
-
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
     const user = await userModel
@@ -453,8 +463,7 @@ const getUserProfile = async (req, res) => {
   }
 };
 
-
-// ADMIN LOGIN — preserved
+// ADMIN LOGIN
 const adminLogin = async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -477,7 +486,8 @@ const adminLogin = async (req, res) => {
       message: "Invalid credentials",
     });
   } catch (error) {
-    console.error("Admin login error:", error);
+    console.error("Admin login error:", error.message);
+
     return res.status(500).json({
       success: false,
       message: "Unable to log in",
@@ -493,5 +503,5 @@ export {
   resendSignupOtp,
   forgotPassword,
   resetPassword,
-  getUserProfile
+  getUserProfile,
 };
