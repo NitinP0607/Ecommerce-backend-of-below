@@ -24,15 +24,14 @@ const otpExpiry = () =>
 const sendOtpEmail = async (email, otp, purpose) => {
   const isSignup = purpose === "signup";
 
-  await transporter.sendMail({
+  return transporter.sendMail({
     from: process.env.SENDER_EMAIL,
     to: email,
     subject: isSignup
       ? "Verify your NITRA account"
       : "NITRA password reset OTP",
-    text: `Your NITRA ${
-      isSignup ? "verification" : "password reset"
-    } OTP is ${otp}. It expires in 10 minutes. Do not share this code.`,
+    text: `Your NITRA ${isSignup ? "verification" : "password reset"
+      } OTP is ${otp}. It expires in 10 minutes. Do not share this code.`,
     html: `
       <div style="font-family:Arial,sans-serif;max-width:500px;margin:auto;padding:24px">
         <h2>NITRA</h2>
@@ -105,9 +104,24 @@ const registerUser = async (req, res) => {
     await user.save();
 
     try {
-      await sendOtpEmail(email, otp, "signup");
+      console.log("REGISTER: sending OTP email");
+
+      const info = await sendOtpEmail(email, otp, "signup");
+
+      console.log("REGISTER: email accepted by SMTP", {
+        messageId: info.messageId,
+        accepted: info.accepted,
+        rejected: info.rejected,
+      });
     } catch (mailError) {
-      console.error("Signup email error:", mailError.message);
+      console.error("Signup email error:", {
+        message: mailError.message,
+        code: mailError.code,
+        command: mailError.command,
+        responseCode: mailError.responseCode,
+        response: mailError.response,
+      });
+
       return res.status(503).json({
         success: false,
         message:
