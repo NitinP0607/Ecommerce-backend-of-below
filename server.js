@@ -18,8 +18,16 @@ connectCloudinary();
 
 //middlewares
 
+app.use(cors({
+  origin: [
+    "https://ecommerce-rose-chi.vercel.app/",
+    "http://localhost:5174",
+    "http://localhost:5173"
+  ],
+  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
 app.use(express.json());
-app.use(cors());
 
 //API endpoints
 app.use('/api/user', userRouter)
