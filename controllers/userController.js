@@ -4,7 +4,6 @@ import validator from "validator";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { randomInt, createHash } from "crypto";
-import { transporter } from "../configue/nodemailer.js";
 
 const createToken = (id) => {
   return jwt.sign({ id }, process.env.JWT_SECRET, {
@@ -21,48 +20,82 @@ const hashOtp = (otp) =>
 const otpExpiry = () =>
   new Date(Date.now() + 10 * 60 * 1000);
 
+
+
 const sendOtpEmail = async (email, otp, purpose) => {
   const isSignup = purpose === "signup";
 
+  const apiKey = process.env.BREVO_API_KEY;
+  const senderEmail = process.env.SENDER_EMAIL;
+
+  if (!apiKey || !senderEmail) {
+    throw new Error("Brevo API key or sender email is missing");
+  }
+
+  const payload = {
+    sender: {
+      name: "NITRA",
+      email: senderEmail,
+    },
+    to: [{ email }],
+    subject: isSignup
+      ? "Verify your NITRA account"
+      : "NITRA password reset OTP",
+    textContent: `Your NITRA ${
+      isSignup ? "verification" : "password reset"
+    } OTP is ${otp}. It expires in 10 minutes.`,
+    htmlContent: `
+      <div style="font-family:Arial,sans-serif">
+        <h2>NITRA</h2>
+        <h3>${isSignup ? "Verify your email" : "Reset your password"}</h3>
+        <p>Your one-time password is:</p>
+        <h1>${otp}</h1>
+        <p>This code expires in 10 minutes.</p>
+        <p>If you did not request this, ignore this email.</p>
+      </div>
+    `,
+  };
+
   try {
-    const info = await transporter.sendMail({
-      from: process.env.SENDER_EMAIL,
-      to: email,
-      subject: isSignup
-        ? "Verify your NITRA account"
-        : "NITRA password reset OTP",
-      text: `Your NITRA ${
-        isSignup ? "verification" : "password reset"
-      } OTP is ${otp}. It expires in 10 minutes.`,
-      html: `
-        <div style="font-family:Arial,sans-serif">
-          <h2>NITRA</h2>
-          <h3>${isSignup ? "Verify your email" : "Reset your password"}</h3>
-          <p>Your one-time password is:</p>
-          <h1>${otp}</h1>
-          <p>This code expires in 10 minutes.</p>
-          <p>If you did not request this, you can ignore this email.</p>
-        </div>
-      `,
-    });
+    const response = await fetch(
+      "https://api.brevo.com/v3/smtp/email",
+      {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          "api-key": apiKey,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(20000),
+      }
+    );
 
-    console.log("OTP email accepted:", info.messageId);
+    const result = await response.json().catch(() => ({}));
 
-    if (info.rejected?.includes(email)) {
-      throw new Error("Recipient rejected by email server");
+    if (!response.ok) {
+      console.error("Brevo API error:", {
+        status: response.status,
+        code: result.code,
+        message: result.message,
+      });
+
+      throw new Error(`Brevo API failed: ${response.status}`);
     }
 
-    return info;
+    console.log("Brevo accepted email:", result.messageId);
+    return result;
   } catch (error) {
     console.error("OTP email failed:", {
       message: error.message,
       code: error.code,
-      command: error.command,
-      responseCode: error.responseCode,
+      name: error.name,
     });
     throw error;
   }
 };
+
+
 
 // REGISTER
 const registerUser = async (req, res) => {
